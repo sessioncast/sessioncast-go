@@ -91,9 +91,11 @@ type Client struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	logger     *slog.Logger
+	localMode  bool // true = no relay, direct tmux execution
 }
 
 // NewClient creates a new SessionCast client.
+// If no token is provided, the client operates in local mode (no relay connection).
 func NewClient(opts ...ClientOption) *Client {
 	cfg := clientConfig{
 		pingInterval:   defaultPingInterval,
@@ -108,17 +110,32 @@ func NewClient(opts ...ClientOption) *Client {
 		logger = slog.Default()
 	}
 
+	localMode := cfg.token == ""
+
 	return &Client{
-		cfg:    cfg,
-		corr:   newCorrelator(),
-		capNeg: newCapabilityNegotiator(),
-		done:   make(chan struct{}),
-		logger: logger,
+		cfg:       cfg,
+		corr:      newCorrelator(),
+		capNeg:    newCapabilityNegotiator(),
+		done:      make(chan struct{}),
+		logger:    logger,
+		localMode: localMode,
 	}
 }
 
+// IsLocalMode returns true if the client is in local-direct mode (no relay).
+func (c *Client) IsLocalMode() bool {
+	return c.localMode
+}
+
 // Connect establishes a WebSocket connection and registers with the relay.
+// In local mode (no token), this is a no-op.
 func (c *Client) Connect(ctx context.Context) error {
+	if c.localMode {
+		c.logger.Info("local mode — no relay connection needed")
+		c.setConnected(true)
+		return nil
+	}
+
 	dialURL := c.cfg.relayURL
 
 	// Append token as query parameter if present
@@ -264,12 +281,30 @@ func (c *Client) handleMessage(msg Message) {
 	case TypePing:
 		c.sendMessage(Message{Type: TypePong})
 
-	case TypeAPIResponse:
+	case TypeAPIResponseStream:
 		if msg.Meta != nil && msg.Meta.RequestID != "" {
-			c.corr.Complete(msg.Meta.RequestID, &ApiResponse{
+			c.corr.SendStream(msg.Meta.RequestID, &ApiResponse{
 				Payload: msg.Meta.Payload,
 				Error:   msg.Meta.Error,
 			})
+		}
+
+	case TypeAPIResponse:
+		if msg.Meta != nil && msg.Meta.RequestID != "" {
+			// If this requestId is registered for streaming, deliver the
+			// final response through the stream channel and close it.
+			if c.corr.IsStreaming(msg.Meta.RequestID) {
+				c.corr.SendStream(msg.Meta.RequestID, &ApiResponse{
+					Payload: msg.Meta.Payload,
+					Error:   msg.Meta.Error,
+				})
+				c.corr.CompleteStream(msg.Meta.RequestID)
+			} else {
+				c.corr.Complete(msg.Meta.RequestID, &ApiResponse{
+					Payload: msg.Meta.Payload,
+					Error:   msg.Meta.Error,
+				})
+			}
 		}
 
 	case TypeCapabilityResult:

@@ -4,18 +4,19 @@ import "encoding/json"
 
 // Message types
 const (
-	TypeRegister          = "register"
-	TypePing              = "ping"
-	TypePong              = "pong"
-	TypeExec              = "exec"
-	TypeLLMChat           = "llm_chat"
-	TypeSendKeys          = "send_keys"
-	TypeListSessions      = "list_sessions"
-	TypeAPIResponse       = "api_response"
-	TypeCapabilityRequest = "capability_request"
-	TypeCapabilityGrant   = "capability_grant"
-	TypeCapabilityResult  = "capability_result"
-	TypeError             = "error"
+	TypeRegister            = "register"
+	TypePing                = "ping"
+	TypePong                = "pong"
+	TypeExec                = "exec"
+	TypeLLMChat             = "llm_chat"
+	TypeSendKeys            = "send_keys"
+	TypeListSessions        = "list_sessions"
+	TypeAPIResponse         = "api_response"
+	TypeAPIResponseStream   = "api_response_stream"
+	TypeCapabilityRequest   = "capability_request"
+	TypeCapabilityGrant     = "capability_grant"
+	TypeCapabilityResult    = "capability_result"
+	TypeError               = "error"
 )
 
 // Roles
@@ -99,6 +100,13 @@ type LlmError struct {
 
 func (e *LlmError) Error() string {
 	return e.Message
+}
+
+// LlmStreamChunk represents a single chunk in a streaming LLM response.
+type LlmStreamChunk struct {
+	Content string `json:"content"`
+	Done    bool   `json:"done"`
+	Error   string `json:"error,omitempty"`
 }
 
 // --- Exec ---

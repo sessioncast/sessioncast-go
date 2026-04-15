@@ -4,12 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
 
-// Exec runs a shell command on the remote CLI agent and returns the result.
+// Exec runs a shell command. In local mode, executes directly via tmux.
+// In relay mode, sends to the remote CLI agent.
 func (c *Client) Exec(ctx context.Context, req *ExecRequest) (*ExecResult, error) {
+	if c.localMode {
+		timeout := c.cfg.requestTimeout
+		if req.Timeout > 0 {
+			timeout = time.Duration(req.Timeout) * time.Millisecond
+		}
+		return ExecLocal(ctx, &ExecLocalSpec{
+			Command:       req.Command,
+			Cwd:           req.Cwd,
+			IdleThreshold: 3 * time.Second,
+			MaxWait:       timeout,
+		})
+	}
+
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("client not connected")
 	}

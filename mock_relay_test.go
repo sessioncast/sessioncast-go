@@ -121,36 +121,100 @@ func (mr *mockRelay) handleConn(t *testing.T, conn *websocket.Conn) {
 
 		case TypeLLMChat:
 			requestID := ""
+			payload := ""
 			if msg.Meta != nil {
 				requestID = msg.Meta.RequestID
+				payload = msg.Meta.Payload
 			}
 
-			chatResp := LlmChatResponse{
-				ID:    "mock-chat-123",
-				Model: "mock-model",
-				Choices: []Choice{
-					{
-						Index:        0,
-						Message:      ChatMessage{Role: "assistant", Content: "Hello from mock LLM!"},
-						FinishReason: "stop",
+			// Check if streaming is requested
+			var chatReq LlmChatRequest
+			json.Unmarshal([]byte(payload), &chatReq)
+
+			if chatReq.Stream {
+				// Send streaming chunks
+				chunks := []string{"Hello ", "from ", "mock ", "LLM!"}
+				for _, chunk := range chunks {
+					chunkPayload, _ := json.Marshal(LlmStreamChunk{
+						Content: chunk,
+						Done:    false,
+					})
+					conn.WriteJSON(Message{
+						Type: TypeAPIResponseStream,
+						Meta: &MessageMeta{
+							RequestID: requestID,
+							Payload:   string(chunkPayload),
+						},
+					})
+					time.Sleep(5 * time.Millisecond)
+				}
+
+				// Send done chunk
+				donePayload, _ := json.Marshal(LlmStreamChunk{
+					Content: "",
+					Done:    true,
+				})
+				conn.WriteJSON(Message{
+					Type: TypeAPIResponseStream,
+					Meta: &MessageMeta{
+						RequestID: requestID,
+						Payload:   string(donePayload),
 					},
-				},
-				Usage: &Usage{
-					PromptTokens:     10,
-					CompletionTokens: 5,
-					TotalTokens:      15,
-				},
-			}
-			respJSON, _ := json.Marshal(chatResp)
+				})
 
-			resp := Message{
-				Type: TypeAPIResponse,
-				Meta: &MessageMeta{
-					RequestID: requestID,
-					Payload:   string(respJSON),
-				},
+				// Send final api_response
+				chatResp := LlmChatResponse{
+					ID:    "mock-chat-stream-123",
+					Model: "mock-model",
+					Choices: []Choice{
+						{
+							Index:        0,
+							Message:      ChatMessage{Role: "assistant", Content: "Hello from mock LLM!"},
+							FinishReason: "stop",
+						},
+					},
+					Usage: &Usage{
+						PromptTokens:     10,
+						CompletionTokens: 5,
+						TotalTokens:      15,
+					},
+				}
+				respJSON, _ := json.Marshal(chatResp)
+				conn.WriteJSON(Message{
+					Type: TypeAPIResponse,
+					Meta: &MessageMeta{
+						RequestID: requestID,
+						Payload:   string(respJSON),
+					},
+				})
+			} else {
+				chatResp := LlmChatResponse{
+					ID:    "mock-chat-123",
+					Model: "mock-model",
+					Choices: []Choice{
+						{
+							Index:        0,
+							Message:      ChatMessage{Role: "assistant", Content: "Hello from mock LLM!"},
+							FinishReason: "stop",
+						},
+					},
+					Usage: &Usage{
+						PromptTokens:     10,
+						CompletionTokens: 5,
+						TotalTokens:      15,
+					},
+				}
+				respJSON, _ := json.Marshal(chatResp)
+
+				resp := Message{
+					Type: TypeAPIResponse,
+					Meta: &MessageMeta{
+						RequestID: requestID,
+						Payload:   string(respJSON),
+					},
+				}
+				conn.WriteJSON(resp)
 			}
-			conn.WriteJSON(resp)
 
 		case TypeSendKeys:
 			requestID := ""
@@ -368,6 +432,90 @@ func TestMockRelayListSessions(t *testing.T) {
 	}
 	if sessions[0].Name != "main" {
 		t.Errorf("expected first session 'main', got %q", sessions[0].Name)
+	}
+}
+
+func TestMockRelayLlmChatStream(t *testing.T) {
+	relay := newMockRelay(t)
+	defer relay.Close()
+
+	client := NewClient(
+		WithRelayURL(relay.URL()),
+		WithToken("test-token"),
+		WithMachineID("test-machine"),
+		WithAgentID("test-agent"),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	streamCh, err := client.LlmChatStream(ctx, &LlmChatRequest{
+		Model: "test-model",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "Say hello"},
+		},
+		MaxTokens: 100,
+	})
+	if err != nil {
+		t.Fatalf("llm_chat_stream: %v", err)
+	}
+
+	var chunks []string
+	var finalResp *LlmChatResponse
+	doneChunkReceived := false
+
+	for event := range streamCh {
+		if event.Error != nil {
+			t.Fatalf("stream error: %v", event.Error)
+		}
+		if event.Chunk != nil {
+			if event.Chunk.Done {
+				doneChunkReceived = true
+			} else {
+				chunks = append(chunks, event.Chunk.Content)
+			}
+		}
+		if event.Response != nil {
+			finalResp = event.Response
+		}
+	}
+
+	t.Logf("chunks received: %v", chunks)
+	t.Logf("done chunk received: %v", doneChunkReceived)
+
+	expectedChunks := []string{"Hello ", "from ", "mock ", "LLM!"}
+	if len(chunks) != len(expectedChunks) {
+		t.Fatalf("expected %d chunks, got %d: %v", len(expectedChunks), len(chunks), chunks)
+	}
+	for i, c := range chunks {
+		if c != expectedChunks[i] {
+			t.Errorf("chunk[%d]: expected %q, got %q", i, expectedChunks[i], c)
+		}
+	}
+
+	if !doneChunkReceived {
+		t.Error("expected done chunk")
+	}
+
+	if finalResp == nil {
+		t.Fatal("expected final response")
+	}
+	if finalResp.ID != "mock-chat-stream-123" {
+		t.Errorf("expected response id %q, got %q", "mock-chat-stream-123", finalResp.ID)
+	}
+	if len(finalResp.Choices) == 0 {
+		t.Fatal("no choices in final response")
+	}
+	if finalResp.Choices[0].Message.Content != "Hello from mock LLM!" {
+		t.Errorf("unexpected final content: %q", finalResp.Choices[0].Message.Content)
+	}
+	if finalResp.Usage == nil || finalResp.Usage.TotalTokens != 15 {
+		t.Errorf("unexpected usage: %+v", finalResp.Usage)
 	}
 }
 
